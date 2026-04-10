@@ -38,20 +38,24 @@
 #     The following variables can be adjusted at the top of the script:
 #
 #         AUTO_REBOOT=true     # Set to false to skip reboot and restart services instead
-#         SCRIPT_VERSION="v1.1"
+#         SCRIPT_VERSION="v1.4"
 #
 # VERSION
-#     v1.1
+#     v1.4
 #
 #===============================================================================
 
+#!/bin/bash
+
 set -euo pipefail
-SCRIPT_NAME="auto-update"
-SCRIPT_VERSION="v1.1"
+
+# GLOBAL
+SCRIPT_VERSION="1.4"
+RUNNING_SERVICES=()
 AUTO_REBOOT=true  # Set to false to skip reboot and restart services
 
 # JSON logger
-SHWriteJson() {
+log_json() {
     local timestamp
     timestamp=$(date --iso-8601=seconds)
 
@@ -60,20 +64,29 @@ SHWriteJson() {
     local result="${3:-undefined}"
     local event="${4:-generic event}"
     local service="${5:-update-script}"
-    local scriptversion="${SCRIPT_VERSION:-v0.0.1}"  # global fallback
+    local scriptversion="${SCRIPT_VERSION:-1.4}"  # fallback om global saknas
 
-    echo "{\"timestamp\":\"$timestamp\",\"event_type\":\"$SCRIPT_NAME\",\"service\":\"$service\",\"server\":\"$server\",\"action\":\"$action\",\"result\":\"$result\",\"message\":\"$event\",\"script_version\":\"$scriptversion\"}" \
-    | systemd-cat -t $SCRIPT_NAME
+    echo "{\"timestamp\":\"$timestamp\",\"event_type\":\"auto-update\",\"service\":\"$service\",\"server\":\"$server\",\"action\":\"$action\",\"result\":\"$result\",\"message\":\"$event\",\"script_version\":\"$scriptversion\"}" \
+    | systemd-cat -t auto-update
 }
 
 # Start
-SHWriteJson "$(hostname)" "start" "ok" "System update initiated"
+log_json "$(hostname)" "start" "ok" "System update initiated"
+
+for svc in nginx apache2 ssh haproxy named; do
+    if systemctl is-active --quiet "$svc"; then
+        RUNNING_SERVICES+=("$svc")
+        log_json "$(hostname)" "service-detect" "active" "$svc is running (will be restarted)" "$svc"
+    else
+        log_json "$(hostname)" "service-detect" "inactive" "$svc is not running" "$svc"
+    fi
+done
 
 # apt update
-if apt update -y; then
-    SHWriteJson "$(hostname)" "apt-update" "success" "Package list updated"
+if apt update; then
+    log_json "$(hostname)" "apt-update" "success" "Package list updated"
 else
-    SHWriteJson "$(hostname)" "apt-update" "failure" "Failed to update package list"
+    log_json "$(hostname)" "apt-update" "failure" "Failed to update package list"
     exit 1
 fi
 
@@ -82,17 +95,17 @@ if DEBIAN_FRONTEND=noninteractive \
    apt -o Dpkg::Options::="--force-confdef" \
        -o Dpkg::Options::="--force-confold" \
        upgrade -y; then
-    SHWriteJson "$(hostname)" "apt-upgrade" "success" "Packages upgraded (kept local config)"
+    log_json "$(hostname)" "apt-upgrade" "success" "Packages upgraded (kept local config)"
 else
-    SHWriteJson "$(hostname)" "apt-upgrade" "failure" "Failed to upgrade packages"
+    log_json "$(hostname)" "apt-upgrade" "failure" "Failed to upgrade packages"
     exit 1
 fi
 
 # apt autoremove + autoclean
 if apt autoremove -y && apt autoclean -y; then
-    SHWriteJson "$(hostname)" "cleanup" "success" "Autoremove and autoclean completed"
+    log_json "$(hostname)" "cleanup" "success" "Autoremove and autoclean completed"
 else
-    SHWriteJson "$(hostname)" "cleanup" "failure" "Cleanup failed"
+    log_json "$(hostname)" "cleanup" "failure" "Cleanup failed"
     exit 1
 fi
 
@@ -101,31 +114,33 @@ REBOOT_REQUIRED=false
 
 if [ -f /var/run/reboot-required ]; then
     REBOOT_REQUIRED=true
-    SHWriteJson "$(hostname)" "reboot-check" "required" "System reboot required"
+    log_json "$(hostname)" "reboot-check" "required" "System reboot required"
 else
-    SHWriteJson "$(hostname)" "reboot-check" "not-required" "No reboot required"
+    log_json "$(hostname)" "reboot-check" "not-required" "No reboot required"
 fi
 
 # Handle reboot or service restart
 if $REBOOT_REQUIRED && $AUTO_REBOOT; then
-    SHWriteJson "$(hostname)" "reboot" "scheduled" "System will reboot in 1 minute"
+    log_json "$(hostname)" "reboot" "scheduled" "System will reboot in 1 minute"
     shutdown -r +1 "System rebooting to complete updates. Save your work!"
-elif $REBOOT_REQUIRED && ! $AUTO_REBOOT; then
-    SHWriteJson "$(hostname)" "reboot" "skipped" "Reboot required but skipped – restarting services"
 
-    for svc in nginx apache2 ssh haproxy named; do
-        if systemctl list-units --type=service | grep -q "${svc}.service"; then
-            if systemctl is-active --quiet "$svc"; then
-                systemctl restart "$svc"
-                SHWriteJson "$(hostname)" "service-restart" "success" "Restarted $svc" "$svc"
-            else
-                SHWriteJson "$(hostname)" "service-restart" "skipped" "$svc is not active" "$svc"
-            fi
+else
+    log_json "$(hostname)" "post-update" "service-restart" "Restarting previously running services"
+
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    sleep 5
+
+    for svc in "${RUNNING_SERVICES[@]}"; do
+        if timeout 30 systemctl restart "$svc"; then
+	    echo "Restarted $svc"
+            log_json "$(hostname)" "service-restart" "success" "Restarted $svc" "$svc"
         else
-            SHWriteJson "$(hostname)" "service-restart" "missing" "$svc not installed" "$svc"
+            echo "Failed to restart $svc"
+            log_json "$(hostname)" "service-restart" "failure" "Failed to restart $svc" "$svc"
         fi
     done
 fi
 
 # End
-SHWriteJson "$(hostname)" "end" "success" "System update completed"
+log_json "$(hostname)" "end" "success" "System update completed"
