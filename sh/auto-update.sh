@@ -51,6 +51,7 @@ set -euo pipefail
 
 # GLOBAL
 SCRIPT_VERSION="1.4"
+CRITICAL_SERVICES="nginx apache2 ssh haproxy named"
 RUNNING_SERVICES=()
 AUTO_REBOOT=true  # Set to false to skip reboot and restart services
 
@@ -73,7 +74,7 @@ log_json() {
 # Start
 log_json "$(hostname)" "start" "ok" "System update initiated"
 
-for svc in nginx apache2 ssh haproxy named; do
+for svc in ${CRITICAL_SERVICES}"; do
     if systemctl is-active --quiet "$svc"; then
         RUNNING_SERVICES+=("$svc")
         log_json "$(hostname)" "service-detect" "active" "$svc is running (will be restarted)" "$svc"
