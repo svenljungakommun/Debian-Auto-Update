@@ -74,7 +74,7 @@ log_json() {
 # Start
 log_json "$(hostname)" "start" "ok" "System update initiated"
 
-for svc in ${CRITICAL_SERVICES}"; do
+for svc in ${CRITICAL_SERVICES}; do
     if systemctl is-active --quiet "$svc"; then
         RUNNING_SERVICES+=("$svc")
         log_json "$(hostname)" "service-detect" "active" "$svc is running (will be restarted)" "$svc"
